@@ -1,6 +1,7 @@
 package com.slack.kaldb.clusterManager;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Splitter;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.AbstractScheduledService;
 import com.slack.kaldb.blobfs.s3.S3BlobFs;
@@ -13,6 +14,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.URI;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -65,6 +68,7 @@ public class ObjectStorageReconciliationService extends AbstractScheduledService
   @Override
   protected void shutDown() throws Exception {
     LOG.info("Shutting down object storage reconciliation service");
+    executorService.shutdown();
   }
 
   @Override
@@ -97,17 +101,59 @@ public class ObjectStorageReconciliationService extends AbstractScheduledService
   }
 
   protected Set<SnapshotMetadata> snapshotsWithoutFiles(List<SnapshotMetadata> snapshotMetadataList, Set<String> filePaths) throws ExecutionException, InterruptedException {
+    Set<String> filePathsExploded =
+        executorService.submit(() -> filePaths.parallelStream()
+            .flatMap(filePath -> {
+              List<String> filePathParts = Splitter.on("/").splitToList(filePath);
+              List<String> filePathPartsSet = new ArrayList<>();
+              for(int i = 0; i < filePathParts.size(); i++){
+                StringBuilder stringBuilder = new StringBuilder();
+                // add the previous string, if there is one
+                if (i > 0) {
+                  stringBuilder.append(filePathPartsSet.get(i - 1));
+                }
+                stringBuilder.append(filePathParts.get(i));
+                // don't do the last one
+                if (i < filePathParts.size() - 1) {
+                  stringBuilder.append("/");
+                }
+                filePathPartsSet.add(stringBuilder.toString());
+              }
+              return filePathPartsSet.stream();
+            })
+            .collect(Collectors.toCollection(HashSet::new))).get();
+
     return executorService.submit(() -> snapshotMetadataList.parallelStream()
-        .filter(snapshotMetadata -> filePaths.stream().noneMatch(filePath -> filePath.contains(snapshotMetadata.snapshotPath)))
+        .filter(snapshotMetadata -> !filePathsExploded.contains(snapshotMetadata.snapshotPath))
         .collect(Collectors.toUnmodifiableSet())).get();
   }
 
   protected Set<String> filesWithoutSnapshots(Set<String> filePaths, List<SnapshotMetadata> snapshotMetadataList) throws ExecutionException, InterruptedException {
     Set<String> snapshotPaths = snapshotMetadataList.stream()
         .map(snapshotMetadata -> snapshotMetadata.snapshotPath)
-        .collect(Collectors.toUnmodifiableSet());
+        .collect(Collectors.toCollection(HashSet::new));
     return executorService.submit(() -> filePaths.parallelStream()
-        .filter(filePath -> snapshotPaths.stream().noneMatch(filePath::contains))
+        .filter(filePath -> {
+          List<String> filePathParts = Splitter.on("/").splitToList(filePath);
+          List<String> filePathPartsSet = new ArrayList<>();
+          for(int i = 0; i < filePathParts.size(); i++){
+            StringBuilder stringBuilder = new StringBuilder();
+            // add the previous string, if there is one
+            if (i > 0) {
+              String previousString = filePathPartsSet.get(i - 1);
+              stringBuilder.append(previousString);
+            }
+            stringBuilder.append(filePathParts.get(i));
+            // don't do the last one
+            if (i < filePathParts.size() - 1) {
+              stringBuilder.append("/");
+            }
+            filePathPartsSet.add(stringBuilder.toString());
+          }
+
+          //CollectionUtils.containsANy
+          return Collections.disjoint(filePathPartsSet, snapshotPaths);
+        })
         .collect(Collectors.toUnmodifiableSet())).get();
   }
 }

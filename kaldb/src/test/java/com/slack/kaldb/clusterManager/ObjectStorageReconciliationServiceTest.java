@@ -140,7 +140,7 @@ public class ObjectStorageReconciliationServiceTest {
     );
 
     Set<String> files = objectStorageReconciliationService.filesWithoutSnapshots(filePaths, snapshotMetadata);
-    assertThat(files).containsExactlyInAnyOrder("s3://bar/quuz.txt", "s3://corge.txt");
+    assertThat(files).containsExactlyInAnyOrder("s3://bucket/bar/quuz.txt", "s3://bucket/corge.txt");
   }
 
   @Test
@@ -194,12 +194,12 @@ public class ObjectStorageReconciliationServiceTest {
 
     Set<SnapshotMetadata> snapshots = objectStorageReconciliationService.snapshotsWithoutFiles(snapshotMetadata, filePaths);
     assertThat(snapshots.size()).isEqualTo(1);
-    assertThat(snapshots.stream().allMatch(snapshot -> snapshot.snapshotPath.equals("s3://grault"))).isTrue();
+    assertThat(snapshots.stream().allMatch(snapshot -> snapshot.snapshotPath.equals("s3://bucket/grault/"))).isTrue();
   }
 
   @Test
-  public void veryLargeNumbers() throws ExecutionException, InterruptedException {
-    int matchingSnapshotsToCreate = 10_000;
+  public void veryLargeNumbers() throws Exception {
+    int matchingSnapshotsToCreate = 100_000;
     int nonMatchingSnapshotsToCreate = 150;
     int nonMatchingFilesToCreate = 150;
     int filesPerSnapshot = 10;
@@ -229,7 +229,7 @@ public class ObjectStorageReconciliationServiceTest {
     for (int i = 0; i < matchingSnapshotsToCreate; i++) {
       SnapshotMetadata matchingSnapshotMetadata = new SnapshotMetadata(
           UUID.randomUUID().toString(),
-          "s3://bucket/" + usedUuids.get(i),
+          "s3://bucket/" + usedUuids.get(i) + "/",
           Instant.now().minusSeconds(90).toEpochMilli(),
           Instant.now().toEpochMilli(),
           0,
@@ -242,7 +242,7 @@ public class ObjectStorageReconciliationServiceTest {
     for(int i = 0; i < nonMatchingSnapshotsToCreate; i++ ){
       SnapshotMetadata nonMatchingSnapshotMetadata = new SnapshotMetadata(
           UUID.randomUUID().toString(),
-          "s3://bucket/" + UUID.randomUUID(),
+          "s3://bucket/" + UUID.randomUUID() + "/",
           Instant.now().minusSeconds(90).toEpochMilli(),
           Instant.now().toEpochMilli(),
           0,
@@ -287,5 +287,7 @@ public class ObjectStorageReconciliationServiceTest {
         nonMatchingFilesToCreate
     );
     assertThat(files).containsExactlyInAnyOrderElementsOf(nonMatchingFilePaths);
+
+    objectStorageReconciliationService.shutDown();
   }
 }
