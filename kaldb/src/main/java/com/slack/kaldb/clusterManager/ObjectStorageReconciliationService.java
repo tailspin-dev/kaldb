@@ -1,5 +1,7 @@
 package com.slack.kaldb.clusterManager;
 
+import static com.slack.kaldb.config.KaldbConfig.DEFAULT_ZK_TIMEOUT_SECS;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Splitter;
 import com.google.common.collect.Sets;
@@ -9,22 +11,21 @@ import com.slack.kaldb.metadata.snapshot.SnapshotMetadata;
 import com.slack.kaldb.metadata.snapshot.SnapshotMetadataStore;
 import com.slack.kaldb.proto.config.KaldbConfigs;
 import io.micrometer.core.instrument.MeterRegistry;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.IOException;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Function;
 import java.util.stream.Collectors;
-
-import static com.slack.kaldb.config.KaldbConfig.DEFAULT_ZK_TIMEOUT_SECS;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class ObjectStorageReconciliationService extends AbstractScheduledService {
   private static final Logger LOG =
@@ -36,8 +37,7 @@ public class ObjectStorageReconciliationService extends AbstractScheduledService
   private final MeterRegistry meterRegistry;
   private final S3BlobFs s3BlobFs;
 
-  @VisibleForTesting
-  protected int futuresListTimeoutSecs = DEFAULT_ZK_TIMEOUT_SECS;
+  @VisibleForTesting protected int futuresListTimeoutSecs = DEFAULT_ZK_TIMEOUT_SECS;
 
   //  public static final String SNAPSHOT_DELETE_SUCCESS = "snapshot_delete_success";
   //  public static final String SNAPSHOT_DELETE_FAILED = "snapshot_delete_failed";
@@ -72,8 +72,7 @@ public class ObjectStorageReconciliationService extends AbstractScheduledService
   }
 
   @Override
-  protected void runOneIteration() throws Exception {
-  }
+  protected void runOneIteration() throws Exception {}
 
   @Override
   protected Scheduler scheduler() {
@@ -92,7 +91,8 @@ public class ObjectStorageReconciliationService extends AbstractScheduledService
     List<SnapshotMetadata> snapshotMetadata = snapshotMetadataStore.getCached();
 
     Set<String> filesWithoutSnapshots = filesWithoutSnapshots(filePaths, snapshotMetadata);
-    Set<SnapshotMetadata> snapshotsWithoutFiles = snapshotsWithoutFiles(snapshotMetadata, filePaths);
+    Set<SnapshotMetadata> snapshotsWithoutFiles =
+        snapshotsWithoutFiles(snapshotMetadata, filePaths);
 
     // todo - foreach filesWithoutSnapshots, delete
     // todo - foreach snapshotsWithoutFiles, report
@@ -100,60 +100,60 @@ public class ObjectStorageReconciliationService extends AbstractScheduledService
     return 0;
   }
 
-  protected Set<SnapshotMetadata> snapshotsWithoutFiles(List<SnapshotMetadata> snapshotMetadataList, Set<String> filePaths) throws ExecutionException, InterruptedException {
-    Set<String> filePathsExploded =
-        executorService.submit(() -> filePaths.parallelStream()
-            .flatMap(filePath -> {
-              List<String> filePathParts = Splitter.on("/").splitToList(filePath);
-              List<String> filePathPartsSet = new ArrayList<>();
-              for(int i = 0; i < filePathParts.size(); i++){
-                StringBuilder stringBuilder = new StringBuilder();
-                // add the previous string, if there is one
-                if (i > 0) {
-                  stringBuilder.append(filePathPartsSet.get(i - 1));
-                }
-                stringBuilder.append(filePathParts.get(i));
-                // don't do the last one
-                if (i < filePathParts.size() - 1) {
-                  stringBuilder.append("/");
-                }
-                filePathPartsSet.add(stringBuilder.toString());
-              }
-              return filePathPartsSet.stream();
-            })
-            .collect(Collectors.toCollection(HashSet::new))).get();
+  protected Set<SnapshotMetadata> snapshotsWithoutFiles(
+      List<SnapshotMetadata> snapshotMetadataList, Set<String> filePaths) {
+    Map<String, SnapshotMetadata> snapshotMetadataMap =
+        snapshotMetadataList
+            .stream()
+            .collect(Collectors.toMap(SnapshotMetadata::getSnapshotPath, Function.identity()));
 
-    return executorService.submit(() -> snapshotMetadataList.parallelStream()
-        .filter(snapshotMetadata -> !filePathsExploded.contains(snapshotMetadata.snapshotPath))
-        .collect(Collectors.toUnmodifiableSet())).get();
+    Splitter splitter = Splitter.on("/");
+    Set<String> filePathsExploded =
+        filePaths
+            .parallelStream()
+            .flatMap(filePath -> explodePath(filePath, splitter).stream())
+            .collect(Collectors.toCollection(HashSet::new));
+
+    return Sets.difference(snapshotMetadataMap.keySet(), filePathsExploded)
+        .stream()
+        .map(snapshotMetadataMap::get)
+        .collect(Collectors.toUnmodifiableSet());
   }
 
-  protected Set<String> filesWithoutSnapshots(Set<String> filePaths, List<SnapshotMetadata> snapshotMetadataList) throws ExecutionException, InterruptedException {
-    Set<String> snapshotPaths = snapshotMetadataList.stream()
-        .map(snapshotMetadata -> snapshotMetadata.snapshotPath)
-        .collect(Collectors.toCollection(HashSet::new));
-    return executorService.submit(() -> filePaths.parallelStream()
-        .filter(filePath -> {
-          List<String> filePathParts = Splitter.on("/").splitToList(filePath);
-          List<String> filePathPartsSet = new ArrayList<>();
-          for(int i = 0; i < filePathParts.size(); i++){
-            StringBuilder stringBuilder = new StringBuilder();
-            // add the previous string, if there is one
-            if (i > 0) {
-              String previousString = filePathPartsSet.get(i - 1);
-              stringBuilder.append(previousString);
-            }
-            stringBuilder.append(filePathParts.get(i));
-            // don't do the last one
-            if (i < filePathParts.size() - 1) {
-              stringBuilder.append("/");
-            }
-            filePathPartsSet.add(stringBuilder.toString());
-          }
+  protected Set<String> filesWithoutSnapshots(
+      Set<String> filePaths, List<SnapshotMetadata> snapshotMetadataList) {
+    Set<String> snapshotPaths =
+        snapshotMetadataList
+            .stream()
+            .map(snapshotMetadata -> snapshotMetadata.snapshotPath)
+            .collect(Collectors.toCollection(HashSet::new));
 
-          //CollectionUtils.containsANy
-          return Collections.disjoint(filePathPartsSet, snapshotPaths);
-        })
-        .collect(Collectors.toUnmodifiableSet())).get();
+    Splitter splitter = Splitter.on("/");
+
+    return filePaths
+        .parallelStream()
+        .filter(filePath -> Collections.disjoint(explodePath(filePath, splitter), snapshotPaths))
+        .collect(Collectors.toUnmodifiableSet());
+  }
+
+  private List<String> explodePath(String filePath, Splitter splitter) {
+    List<String> filePathParts = splitter.splitToList(filePath);
+    List<String> filePathPartsSet = new ArrayList<>(filePathParts.size());
+    StringBuilder stringBuilder = new StringBuilder(filePath.length());
+    for (int i = 0; i < filePathParts.size(); i++) {
+      stringBuilder.setLength(0);
+      // add the previous string, if there is one
+      if (i > 0) {
+        String previousString = filePathPartsSet.get(i - 1);
+        stringBuilder.append(previousString);
+      }
+      stringBuilder.append(filePathParts.get(i));
+      // don't do the last one
+      if (i < filePathParts.size() - 1) {
+        stringBuilder.append("/");
+      }
+      filePathPartsSet.add(stringBuilder.toString());
+    }
+    return filePathPartsSet;
   }
 }
